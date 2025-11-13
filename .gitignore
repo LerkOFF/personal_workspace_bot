@@ -1,0 +1,19 @@
+# venv
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE
+.idea/
+.vscode/
+
+# Env
+.env
+
+# SQLite
+app.db
