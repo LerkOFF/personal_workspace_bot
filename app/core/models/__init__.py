@@ -6,7 +6,8 @@ class Base(DeclarativeBase):
     pass
 
 
-from .user import User    # noqa: F401
-from .task import Task    # noqa: F401
-from .note import Note    # noqa: F401
-from .project import Project  # noqa: F401
+from .user import User
+from .task import Task
+from .note import Note
+from .project import Project
+from .task_file import TaskFile

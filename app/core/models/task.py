@@ -46,8 +46,11 @@ class Task(Base):
     # связи
     user = relationship("User", back_populates="tasks")
     project = relationship("Project", back_populates="tasks")
-
-    # ... существующие поля задачи выше ...
+    files = relationship(
+        "TaskFile",
+        back_populates="task",
+        cascade="all, delete-orphan",
+    )
 
     # ====== Напоминания по дедлайнам ======
     # Отправлено ли напоминание за 1 день до дедлайна

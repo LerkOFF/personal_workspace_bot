@@ -12,19 +12,32 @@ from sqlalchemy.orm import selectinload
 
 from app.bot.keyboards.tasks_menu import tasks_menu_kb
 from app.bot.keyboards.main_menu import main_menu_kb
-from app.bot.states.task_states import NewTaskStates
+from app.bot.states.task_states import NewTaskStates, TaskFileStates
 from app.core.db import async_session_maker
 from app.core.models.user import User
 from app.core.models.task import Task, TaskStatus
 from app.core.models.project import Project
+from app.core.models.task_file import TaskFile
 
 tasks_router = Router()
 
 
 # ====== CallbackData для действий над задачами ======
 class TaskActionCb(CallbackData, prefix="task"):
-    action: str  # "cycle", "delete"
+    # Возможные значения:
+    #  - "cycle"   — сменить статус
+    #  - "delete"  — удалить задачу
+    #  - "files"   — открыть список файлов
+    #  - "attach"  — прикрепить новый файл
+    action: str
     task_id: int
+
+
+class TaskFileCb(CallbackData, prefix="tfile"):
+    # "download" — скачать файл
+    # "delete"   — удалить файл
+    action: str
+    file_id: int
 
 
 # ====== CallbackData для выбора проекта при создании задачи ======
@@ -59,24 +72,94 @@ def task_inline_kb(task: Task):
     builder = InlineKeyboardBuilder()
 
     builder.button(
-        text="🔁 Статус",
+        text=" Статус",
         callback_data=TaskActionCb(
             action="cycle",
             task_id=task.id,
         ).pack(),
     )
-
     builder.button(
-        text="🗑 Удалить",
+        text=" Удалить",
         callback_data=TaskActionCb(
             action="delete",
             task_id=task.id,
         ).pack(),
     )
 
-    builder.adjust(2)
+    # Новая кнопка "Файлы"
+    builder.button(
+        text="📎 Файлы",
+        callback_data=TaskActionCb(
+            action="files",
+            task_id=task.id,
+        ).pack(),
+    )
+
+    # две кнопки в первой строке, одна во второй
+    builder.adjust(2, 1)
     return builder.as_markup()
 
+async def build_task_files_view(session, task_id: int):
+    result = await session.execute(
+        select(TaskFile)
+        .where(TaskFile.task_id == task_id)
+        .order_by(TaskFile.created_at)
+    )
+    files = result.scalars().all()
+
+    if not files:
+        text = (
+            "📎 <b>Файлы задачи</b>\n\n"
+            "У этой задачи пока нет прикреплённых файлов.\n\n"
+            "Отправь документ или фото <b>в ответ</b> на это сообщение, "
+            "чтобы прикрепить его к задаче."
+        )
+        builder = InlineKeyboardBuilder()
+        builder.button(
+            text="📎 Прикрепить файл",
+            callback_data=TaskActionCb(
+                action="attach",
+                task_id=task_id,
+            ).pack(),
+        )
+        builder.adjust(1)
+        return text, builder.as_markup()
+
+    lines = ["📎 <b>Файлы задачи</b>\n"]
+    for idx, f in enumerate(files, start=1):
+        lines.append(f"{idx}. {f.file_name}")
+    text = "\n".join(lines)
+
+    builder = InlineKeyboardBuilder()
+    for f in files:
+        short = f.file_name
+        if len(short) > 20:
+            short = short[:17] + "..."
+        builder.button(
+            text=f"📥 {short}",
+            callback_data=TaskFileCb(
+                action="download",
+                file_id=f.id,
+            ).pack(),
+        )
+        builder.button(
+            text=f"🗑 {short}",
+            callback_data=TaskFileCb(
+                action="delete",
+                file_id=f.id,
+            ).pack(),
+        )
+
+    builder.button(
+        text="📎 Прикрепить файл",
+        callback_data=TaskActionCb(
+            action="attach",
+            task_id=task_id,
+        ).pack(),
+    )
+
+    builder.adjust(2, 1)
+    return text, builder.as_markup()
 
 # ====== Кнопка "📋 Задачи" из главного меню ======
 @tasks_router.message(F.text == "📋 Задачи")
@@ -328,6 +411,7 @@ async def new_task_due_date(message: types.Message, state: FSMContext):
 async def task_action_handler(
     callback: types.CallbackQuery,
     callback_data: TaskActionCb,
+    state: FSMContext,
 ):
     tg_user = callback.from_user
 
@@ -349,9 +433,13 @@ async def task_action_handler(
 
         if task is None or task.user_id != user.id:
             await callback.answer("Эта задача больше не существует.", show_alert=True)
-            await callback.message.edit_text("❌ Задача недоступна.")
+            try:
+                await callback.message.edit_text("❌ Задача недоступна.")
+            except Exception:
+                pass
             return
 
+        # Смена статуса
         if callback_data.action == "cycle":
             if task.status == TaskStatus.TODO:
                 task.status = TaskStatus.IN_PROGRESS
@@ -369,9 +457,185 @@ async def task_action_handler(
             )
             await callback.answer("Статус обновлён ✅")
 
+        # Удаление задачи
         elif callback_data.action == "delete":
             await session.delete(task)
             await session.commit()
-
-            await callback.message.edit_text("🗑 Задача удалена.")
+            try:
+                await callback.message.edit_text(" Задача удалена.")
+            except Exception:
+                pass
             await callback.answer("Задача удалена ✅")
+
+        # Показать список файлов
+        elif callback_data.action == "files":
+            text, kb = await build_task_files_view(session, task.id)
+            await callback.message.answer(text, reply_markup=kb)
+            await callback.answer()
+
+        # Начать прикрепление файла
+        elif callback_data.action == "attach":
+            await state.set_state(TaskFileStates.waiting_for_file)
+            await state.update_data(task_id=task.id)
+            await callback.message.answer(
+                "Отправь файл (документ или фото) <b>одним сообщением</b>, "
+                "чтобы прикрепить его к этой задаче.",
+                reply_markup=main_menu_kb(),
+            )
+            await callback.answer()
+
+@tasks_router.message(TaskFileStates.waiting_for_file)
+async def handle_task_file_upload(message: types.Message, state: FSMContext):
+    tg_user = message.from_user
+
+    doc = message.document
+    photo = message.photo[-1] if message.photo else None
+
+    if not doc and not photo:
+        await message.answer(
+            "Это не похоже на файл.\n"
+            "Отправь, пожалуйста, <b>документ</b> или <b>фото</b>, "
+            "чтобы прикрепить его к задаче."
+        )
+        return
+
+    if doc:
+        file_id = doc.file_id
+        unique_id = doc.file_unique_id
+        file_name = doc.file_name or f"document_{unique_id}"
+        mime_type = doc.mime_type
+        size = doc.file_size
+        file_kind = "document"
+    else:
+        file_id = photo.file_id
+        unique_id = photo.file_unique_id
+        file_name = f"photo_{unique_id}.jpg"
+        mime_type = "image/jpeg"
+        size = photo.file_size
+        file_kind = "photo"
+
+    data = await state.get_data()
+    task_id = data.get("task_id")
+
+    if task_id is None:
+        await state.clear()
+        await message.answer(
+            "Не удалось определить задачу для файла.\n"
+            "Попробуй ещё раз через кнопку «Файлы» у нужной задачи."
+        )
+        return
+
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == tg_user.id)
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            await message.answer("Пользователь не найден в системе.")
+            await state.clear()
+            return
+
+        result = await session.execute(
+            select(Task).where(Task.id == task_id)
+        )
+        task = result.scalar_one_or_none()
+        if task is None or task.user_id != user.id:
+            await message.answer(
+                "Эта задача больше не существует или тебе недоступна."
+            )
+            await state.clear()
+            return
+
+        task_file = TaskFile(
+            task_id=task.id,
+            user_id=user.id,
+            telegram_file_id=file_id,
+            telegram_unique_id=unique_id,
+            file_name=file_name,
+            mime_type=mime_type,
+            file_size=size,
+            file_kind=file_kind,
+        )
+        session.add(task_file)
+        await session.commit()
+
+        text, kb = await build_task_files_view(session, task.id)
+
+    await state.clear()
+    await message.answer("✅ Файл прикреплён к задаче.")
+    await message.answer(text, reply_markup=kb)
+
+@tasks_router.callback_query(TaskFileCb.filter())
+async def task_file_action_handler(
+    callback: types.CallbackQuery,
+    callback_data: TaskFileCb,
+):
+    tg_user = callback.from_user
+
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == tg_user.id)
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            await callback.answer(
+                "Пользователь не найден в системе.",
+                show_alert=True,
+            )
+            return
+
+        result = await session.execute(
+            select(TaskFile).where(TaskFile.id == callback_data.file_id)
+        )
+        file = result.scalar_one_or_none()
+        if file is None or file.user_id != user.id:
+            await callback.answer(
+                "Файл больше не существует или тебе недоступен.",
+                show_alert=True,
+            )
+            return
+
+        # Скачать файл
+        if callback_data.action == "download":
+            await callback.answer()
+            if file.file_kind == "photo":
+                await callback.message.answer_photo(
+                    file.telegram_file_id,
+                    caption=f"📎 {file.file_name}",
+                )
+            else:
+                await callback.message.answer_document(
+                    file.telegram_file_id,
+                    caption=f"📎 {file.file_name}",
+                )
+
+        # Удалить файл
+        elif callback_data.action == "delete":
+            task_id = file.task_id
+            await session.delete(file)
+            await session.commit()
+
+            # Пытаемся обновить список файлов
+            result_task = await session.execute(
+                select(Task).where(Task.id == task_id)
+            )
+            task = result_task.scalar_one_or_none()
+
+            if task is None:
+                try:
+                    await callback.message.edit_text(
+                        "📎 Файлы задачи недоступны (задача удалена)."
+                    )
+                except Exception:
+                    pass
+                await callback.answer("Файл удалён ✅")
+                return
+
+            text, kb = await build_task_files_view(session, task.id)
+            try:
+                await callback.message.edit_text(text, reply_markup=kb)
+            except Exception:
+                # если текст/клавиатура не изменились — игнорируем
+                pass
+
+            await callback.answer("Файл удалён ✅")
