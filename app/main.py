@@ -9,6 +9,7 @@ from app.config import settings
 from app.bot.routers.common import common_router
 from app.bot.routers.tasks import tasks_router
 from app.bot.routers.notes import notes_router
+from app.bot.routers.projects import projects_router
 from app.core.db import init_db
 
 
@@ -31,6 +32,7 @@ async def main():
         common_router,
         tasks_router,
         notes_router,
+        projects_router,
     )
 
     logging.info("Initializing database...")
