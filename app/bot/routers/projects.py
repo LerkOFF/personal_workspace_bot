@@ -8,6 +8,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.filters.callback_data import CallbackData
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+from app.core.models.task import Task, TaskStatus
 
 from app.bot.keyboards.projects_menu import projects_menu_kb
 from app.bot.keyboards.main_menu import main_menu_kb
@@ -39,16 +41,42 @@ def format_project_collapsed(project: Project) -> str:
 
 def format_project_expanded(project: Project) -> str:
     """
-    Развёрнутый вид проекта: полное описание + дата.
+    Развёрнутый вид проекта:
+    название, описание, дата создания и список задач проекта.
     """
     text = f"📁 <b>{project.name}</b>\n\n"
 
+    # описание
     if project.description:
         text += f"{project.description}\n\n"
     else:
         text += "<i>Описание не указано.</i>\n\n"
 
-    text += f"📅 Создан: <code>{project.created_at.strftime('%d.%m.%Y %H:%M')}</code>"
+    # дата создания
+    text += f"📅 Создан: <code>{project.created_at.strftime('%d.%m.%Y %H:%M')}</code>\n"
+
+    # задачи проекта
+    tasks = getattr(project, "tasks", []) or []
+    if not tasks:
+        text += "\n📝 Пока нет задач в этом проекте."
+        return text
+
+    text += "\n\n📝 <b>Задачи проекта:</b>\n"
+
+    for task in tasks:
+        status_emoji = {
+            TaskStatus.TODO: "🟡",
+            TaskStatus.IN_PROGRESS: "🟠",
+            TaskStatus.DONE: "🟢",
+        }.get(task.status, "⚪")
+
+        line = f"{status_emoji} <b>{task.title}</b>"
+
+        if task.due_at:
+            line += f" — до <code>{task.due_at.strftime('%d.%m.%Y')}</code>"
+
+        text += f"\n• {line}"
+
     return text
 
 
@@ -223,7 +251,9 @@ async def project_action_handler(
             return
 
         result = await session.execute(
-            select(Project).where(Project.id == callback_data.project_id)
+            select(Project)
+            .options(selectinload(Project.tasks))
+            .where(Project.id == callback_data.project_id)
         )
         project = result.scalar_one_or_none()
 
