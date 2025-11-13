@@ -4,6 +4,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from app.bot.scheduler import setup_scheduler
 
 from app.config import settings
 from app.bot.routers.common import common_router
@@ -40,6 +41,7 @@ async def main():
     logging.info("Database initialized.")
 
     logging.info("Bot is starting...")
+    setup_scheduler(bot)
     await dp.start_polling(bot)
 
 
