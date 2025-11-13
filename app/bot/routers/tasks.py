@@ -141,6 +141,13 @@ def task_inline_kb(task: Task):
     builder.adjust(2, 2)
     return builder.as_markup()
 
+def cancel_only_kb() -> types.ReplyKeyboardMarkup:
+    return types.ReplyKeyboardMarkup(
+        keyboard=[[types.KeyboardButton(text="❌ Отмена")]],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
 async def build_subtasks_view(session, task: Task):
     result = await session.execute(
         select(SubTask)
@@ -601,8 +608,10 @@ async def task_action_handler(
             await state.update_data(task_id=task.id)
             await callback.message.answer(
                 "Отправь файл (документ или фото) <b>одним сообщением</b>, "
-                "чтобы прикрепить его к этой задаче.",
-                reply_markup=main_menu_kb(),
+                "чтобы прикрепить его к этой задаче.\n\n"
+                "Если передумал — нажми кнопку <b>«❌ Отмена»</b> "
+                "или отправь команду <code>/cancel</code>.",
+                reply_markup=cancel_only_kb(),
             )
             await callback.answer()
 
@@ -850,6 +859,20 @@ async def subtask_action_handler(
 async def handle_task_file_upload(message: types.Message, state: FSMContext):
     tg_user = message.from_user
 
+    # --- Обработка отмены ---
+    if message.text:
+        raw = message.text.strip()
+        text = raw.lower()
+
+        # Ловим и кнопку "❌ Отмена", и просто "Отмена", и /cancel
+        if "отмена" in text or text == "/cancel":
+            await state.clear()
+            await message.answer(
+                "❌ Прикрепление файла отменено.",
+                reply_markup=main_menu_kb(),
+            )
+            return
+
     doc = message.document
     photo = message.photo[-1] if message.photo else None
 
@@ -857,7 +880,8 @@ async def handle_task_file_upload(message: types.Message, state: FSMContext):
         await message.answer(
             "Это не похоже на файл.\n"
             "Отправь, пожалуйста, <b>документ</b> или <b>фото</b>, "
-            "чтобы прикрепить его к задаче."
+            "чтобы прикрепить его к задаче.\n\n"
+            "Если хочешь прекратить прикрепление — отправь текст <b>Отмена</b>."
         )
         return
 
@@ -924,7 +948,10 @@ async def handle_task_file_upload(message: types.Message, state: FSMContext):
         text, kb = await build_task_files_view(session, task.id)
 
     await state.clear()
-    await message.answer("✅ Файл прикреплён к задаче.")
+    await message.answer(
+        "✅ Файл прикреплён к задаче.",
+        reply_markup=main_menu_kb(),
+    )
     await message.answer(text, reply_markup=kb)
 
 @tasks_router.callback_query(TaskFileCb.filter())
