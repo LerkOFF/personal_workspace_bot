@@ -7,6 +7,7 @@ from aiogram.client.default import DefaultBotProperties
 
 from app.config import settings
 from app.bot.routers.common import common_router
+from app.bot.routers.tasks import tasks_router
 from app.core.db import init_db
 
 
@@ -25,10 +26,11 @@ async def main():
 
     dp = Dispatcher()
 
-    # Роутеры
-    dp.include_router(common_router)
+    dp.include_routers(
+        common_router,
+        tasks_router,
+    )
 
-    # ИНИЦИАЛИЗАЦИЯ БД (создание таблиц)
     logging.info("Initializing database...")
     await init_db()
     logging.info("Database initialized.")

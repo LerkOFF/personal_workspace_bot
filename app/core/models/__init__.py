@@ -6,5 +6,5 @@ class Base(DeclarativeBase):
     pass
 
 
-# Импортируем модели, чтобы Alembic/metadata всё видели
 from .user import User  # noqa: F401
+from .task import Task  # noqa: F401
