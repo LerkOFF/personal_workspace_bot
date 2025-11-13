@@ -71,22 +71,25 @@ def format_task_text(task: Task) -> str:
 def task_inline_kb(task: Task):
     builder = InlineKeyboardBuilder()
 
+    # Кнопка смены статуса
     builder.button(
-        text=" Статус",
+        text="🔄 Статус",
         callback_data=TaskActionCb(
             action="cycle",
             task_id=task.id,
         ).pack(),
     )
+
+    # Кнопка удаления
     builder.button(
-        text=" Удалить",
+        text="🗑 Удалить",
         callback_data=TaskActionCb(
             action="delete",
             task_id=task.id,
         ).pack(),
     )
 
-    # Новая кнопка "Файлы"
+    # Кнопка файлов
     builder.button(
         text="📎 Файлы",
         callback_data=TaskActionCb(
@@ -95,7 +98,6 @@ def task_inline_kb(task: Task):
         ).pack(),
     )
 
-    # две кнопки в первой строке, одна во второй
     builder.adjust(2, 1)
     return builder.as_markup()
 
