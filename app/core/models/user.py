@@ -56,3 +56,7 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    subtasks: Mapped[List["SubTask"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )

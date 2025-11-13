@@ -9,5 +9,9 @@ class NewTaskStates(StatesGroup):
 
 
 class TaskFileStates(StatesGroup):
-    # Ждём, когда пользователь отправит файл для конкретной задачи
+    # Ждём файл для прикрепления к задаче
     waiting_for_file = State()
+
+class SubTaskStates(StatesGroup):
+    # Ждём текст новой подзадачи для конкретной задачи
+    waiting_for_title = State()

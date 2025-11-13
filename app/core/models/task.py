@@ -51,6 +51,11 @@ class Task(Base):
         back_populates="task",
         cascade="all, delete-orphan",
     )
+    subtasks = relationship(
+        "SubTask",
+        back_populates="task",
+        cascade="all, delete-orphan",
+    )
 
     # ====== Напоминания по дедлайнам ======
     # Отправлено ли напоминание за 1 день до дедлайна

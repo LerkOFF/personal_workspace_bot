@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, date
 from typing import Optional
+from html import escape
 
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
@@ -12,12 +13,13 @@ from sqlalchemy.orm import selectinload
 
 from app.bot.keyboards.tasks_menu import tasks_menu_kb
 from app.bot.keyboards.main_menu import main_menu_kb
-from app.bot.states.task_states import NewTaskStates, TaskFileStates
+from app.bot.states.task_states import NewTaskStates, TaskFileStates, SubTaskStates
 from app.core.db import async_session_maker
 from app.core.models.user import User
 from app.core.models.task import Task, TaskStatus
 from app.core.models.project import Project
 from app.core.models.task_file import TaskFile
+from app.core.models.subtask import SubTask
 
 tasks_router = Router()
 
@@ -25,19 +27,26 @@ tasks_router = Router()
 # ====== CallbackData для действий над задачами ======
 class TaskActionCb(CallbackData, prefix="task"):
     # Возможные значения:
-    #  - "cycle"   — сменить статус
-    #  - "delete"  — удалить задачу
-    #  - "files"   — открыть список файлов
-    #  - "attach"  — прикрепить новый файл
+    #  - "cycle"        — сменить статус
+    #  - "delete"       — удалить задачу
+    #  - "files"        — открыть список файлов
+    #  - "attach"       — прикрепить файл
+    #  - "subtasks"     — открыть список подзадач
+    #  - "add_subtask"  — добавить новую подзадачу
     action: str
     task_id: int
 
 
 class TaskFileCb(CallbackData, prefix="tfile"):
-    # "download" — скачать файл
-    # "delete"   — удалить файл
-    action: str
+    action: str   # "download" | "delete"
     file_id: int
+
+
+class SubTaskCb(CallbackData, prefix="subt"):
+    # "toggle" — переключить выполнено/невыполнено
+    # "delete" — удалить подзадачу
+    action: str
+    subtask_id: int
 
 
 # ====== CallbackData для выбора проекта при создании задачи ======
@@ -47,25 +56,45 @@ class TaskProjectCb(CallbackData, prefix="tproj"):
 
 # ====== Вспомогательные функции ======
 def format_task_text(task: Task) -> str:
-    status_emoji = {
-        TaskStatus.TODO: "🟡",
-        TaskStatus.IN_PROGRESS: "🟠",
-        TaskStatus.DONE: "🟢",
-    }[task.status]
+    status_map = {
+        TaskStatus.TODO: "📝 To Do",
+        TaskStatus.IN_PROGRESS: "⏳ In Progress",
+        TaskStatus.DONE: "✅ Done",
+    }
 
-    line = f"{status_emoji} <b>{task.title}</b>"
+    lines: list[str] = [
+        f"📌 <b>{escape(task.title)}</b>",
+        "",
+        f"Статус: <b>{status_map.get(task.status, str(task.status))}</b>",
+    ]
 
-    if task.description:
-        line += f"\n    <i>{task.description}</i>"
+    # Проект
+    if getattr(task, "project", None):
+        # в твоём проекте поле у проекта называется title или name — подгони при необходимости
+        project_title = getattr(task.project, "title", None) or getattr(
+            task.project, "name", ""
+        )
+        if project_title:
+            lines.append(f"Проект: <b>{escape(project_title)}</b>")
 
-    if task.project:
-        line += f"\n    📁 Проект: <b>{task.project.name}</b>"
+    # Дедлайн (ИСПОЛЬЗУЕМ due_at, а не due_date)
+    if getattr(task, "due_at", None):
+        lines.append(f"Дедлайн: <code>{task.due_at.strftime('%d.%m.%Y')}</code>")
 
-    if task.due_at:
-        formatted = task.due_at.strftime("%d.%m.%Y")
-        line += f"\n    ⏰ до <b>{formatted}</b>"
+    # Прогресс по подзадачам
+    if hasattr(task, "subtasks"):
+        subs = task.subtasks or []
+        if subs:
+            done = sum(1 for s in subs if s.is_done)
+            total = len(subs)
+            lines.append(f"Подзадачи: <b>{done}/{total}</b> выполнено")
 
-    return line
+    # Описание
+    if getattr(task, "description", None):
+        lines.append("")
+        lines.append(escape(task.description))
+
+    return "\n".join(lines)
 
 
 def task_inline_kb(task: Task):
@@ -98,8 +127,81 @@ def task_inline_kb(task: Task):
         ).pack(),
     )
 
-    builder.adjust(2, 1)
+    # кнопка подзадач
+    builder.button(
+        text="☑️ Подзадачи",
+        callback_data=TaskActionCb(
+            action="subtasks",
+            task_id=task.id,
+        ).pack(),
+    )
+
+    # две кнопки в первой строке, две во второй
+    builder.adjust(2, 2)
     return builder.as_markup()
+
+async def build_subtasks_view(session, task: Task):
+    result = await session.execute(
+        select(SubTask)
+        .where(SubTask.task_id == task.id)
+        .order_by(SubTask.created_at)
+    )
+    subtasks = result.scalars().all()
+
+    lines = [
+        f"☑️ <b>Подзадачи для задачи:</b>\n<b>{escape(task.title)}</b>",
+        "",
+    ]
+
+    if not subtasks:
+        lines.append("Пока нет подзадач.\n")
+        lines.append("Нажми «➕ Добавить подзадачу» или отправь текст новой подзадачи.")
+    else:
+        for idx, s in enumerate(subtasks, start=1):
+            status = "✅" if s.is_done else "⬜️"
+            lines.append(f"{idx}. {status} {escape(s.title)}")
+
+    text = "\n".join(lines)
+
+    builder = InlineKeyboardBuilder()
+
+    # Кнопки для существующих подзадач
+    for s in subtasks:
+        status = "✅" if s.is_done else "⬜️"
+        short = s.title
+        if len(short) > 20:
+            short = short[:17] + "..."
+
+        builder.button(
+            text=f"{status} {short}",
+            callback_data=SubTaskCb(
+                action="toggle",
+                subtask_id=s.id,
+            ).pack(),
+        )
+        builder.button(
+            text="🗑",
+            callback_data=SubTaskCb(
+                action="delete",
+                subtask_id=s.id,
+            ).pack(),
+        )
+
+    # Кнопка добавления новой подзадачи
+    builder.button(
+        text="➕ Добавить подзадачу",
+        callback_data=TaskActionCb(
+            action="add_subtask",
+            task_id=task.id,
+        ).pack(),
+    )
+
+    if subtasks:
+        builder.adjust(2, 1)
+    else:
+        builder.adjust(1)
+
+    return text, builder.as_markup()
 
 async def build_task_files_view(session, task_id: int):
     result = await session.execute(
@@ -187,7 +289,10 @@ async def handle_tasks_menu(message: types.Message):
 
         result = await session.execute(
             select(Task)
-            .options(selectinload(Task.project))
+            .options(
+                selectinload(Task.project),
+                selectinload(Task.subtasks),
+            )
             .where(Task.user_id == user.id)
             .order_by(Task.created_at.desc())
             .limit(10)
@@ -428,7 +533,10 @@ async def task_action_handler(
 
         result = await session.execute(
             select(Task)
-            .options(selectinload(Task.project))
+            .options(
+                selectinload(Task.project),
+                selectinload(Task.subtasks),
+            )
             .where(Task.id == callback_data.task_id)
         )
         task = result.scalar_one_or_none()
@@ -485,6 +593,236 @@ async def task_action_handler(
                 reply_markup=main_menu_kb(),
             )
             await callback.answer()
+
+        # Показать подзадачи
+        elif callback_data.action == "subtasks":
+            text, kb = await build_subtasks_view(session, task)
+            await callback.message.answer(text, reply_markup=kb)
+            await callback.answer()
+
+        # Начать добавление новой подзадачи
+        elif callback_data.action == "add_subtask":
+            await state.set_state(SubTaskStates.waiting_for_title)
+            await state.update_data(task_id=task.id)
+
+            await callback.message.answer(
+                "Введи текст новой подзадачи для этой задачи.\n\n"
+                "Например: <b>Сделать черновик отчёта</b>",
+                reply_markup=main_menu_kb(),
+            )
+            await callback.answer()
+
+@tasks_router.message(SubTaskStates.waiting_for_title)
+async def handle_new_subtask(message: types.Message, state: FSMContext):
+    tg_user = message.from_user
+    title = (message.text or "").strip()
+
+    if not title:
+        await message.answer(
+            "Текст подзадачи не может быть пустым.\n"
+            "Введи, пожалуйста, нормальное описание."
+        )
+        return
+
+    data = await state.get_data()
+    task_id = data.get("task_id")
+
+    if task_id is None:
+        await state.clear()
+        await message.answer(
+            "Не удалось определить, к какой задаче добавить подзадачу.\n"
+            "Попробуй ещё раз через кнопку «☑️ Подзадачи» у нужной задачи."
+        )
+        return
+
+    async with async_session_maker() as session:
+        # находим пользователя
+        result = await session.execute(
+            select(User).where(User.telegram_id == tg_user.id)
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            await message.answer("Пользователь не найден.")
+            await state.clear()
+            return
+
+        # находим задачу
+        result = await session.execute(
+            select(Task)
+            .options(selectinload(Task.subtasks))
+            .where(Task.id == task_id)
+        )
+        task = result.scalar_one_or_none()
+
+        if task is None or task.user_id != user.id:
+            await message.answer(
+                "Эта задача больше не существует или тебе недоступна."
+            )
+            await state.clear()
+            return
+
+        subtask = SubTask(
+            task_id=task.id,
+            user_id=user.id,
+            title=title,
+            is_done=False,
+        )
+        session.add(subtask)
+        await session.commit()
+
+        # Обновляем задачу с подзадачами
+        result = await session.execute(
+            select(Task)
+            .options(selectinload(Task.subtasks))
+            .where(Task.id == task.id)
+        )
+        task = result.scalar_one()
+
+        text, kb = await build_subtasks_view(session, task)
+
+    await state.clear()
+    await message.answer("✅ Подзадача добавлена.")
+    await message.answer(text, reply_markup=kb)
+
+@tasks_router.message(SubTaskStates.waiting_for_title)
+async def handle_new_subtask(message: types.Message, state: FSMContext):
+    tg_user = message.from_user
+    title = (message.text or "").strip()
+
+    if not title:
+        await message.answer(
+            "Текст подзадачи не может быть пустым.\n"
+            "Введи, пожалуйста, нормальное описание."
+        )
+        return
+
+    data = await state.get_data()
+    task_id = data.get("task_id")
+
+    if task_id is None:
+        await state.clear()
+        await message.answer(
+            "Не удалось определить, к какой задаче добавить подзадачу.\n"
+            "Попробуй ещё раз через кнопку «☑️ Подзадачи» у нужной задачи."
+        )
+        return
+
+    async with async_session_maker() as session:
+        # находим пользователя
+        result = await session.execute(
+            select(User).where(User.telegram_id == tg_user.id)
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            await message.answer("Пользователь не найден.")
+            await state.clear()
+            return
+
+        # находим задачу
+        result = await session.execute(
+            select(Task)
+            .options(selectinload(Task.subtasks))
+            .where(Task.id == task_id)
+        )
+        task = result.scalar_one_or_none()
+
+        if task is None or task.user_id != user.id:
+            await message.answer(
+                "Эта задача больше не существует или тебе недоступна."
+            )
+            await state.clear()
+            return
+
+        subtask = SubTask(
+            task_id=task.id,
+            user_id=user.id,
+            title=title,
+            is_done=False,
+        )
+        session.add(subtask)
+        await session.commit()
+
+        # Обновляем задачу с подзадачами
+        result = await session.execute(
+            select(Task)
+            .options(selectinload(Task.subtasks))
+            .where(Task.id == task.id)
+        )
+        task = result.scalar_one()
+
+        text, kb = await build_subtasks_view(session, task)
+
+    await state.clear()
+    await message.answer("✅ Подзадача добавлена.")
+    await message.answer(text, reply_markup=kb)
+
+@tasks_router.callback_query(SubTaskCb.filter())
+async def subtask_action_handler(
+    callback: types.CallbackQuery,
+    callback_data: SubTaskCb,
+):
+    tg_user = callback.from_user
+
+    async with async_session_maker() as session:
+        # пользователь
+        result = await session.execute(
+            select(User).where(User.telegram_id == tg_user.id)
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            await callback.answer("Пользователь не найден.", show_alert=True)
+            return
+
+        # подзадача
+        result = await session.execute(
+            select(SubTask).where(SubTask.id == callback_data.subtask_id)
+        )
+        subtask = result.scalar_one_or_none()
+        if subtask is None or subtask.user_id != user.id:
+            await callback.answer(
+                "Эта подзадача больше не существует или тебе недоступна.",
+                show_alert=True,
+            )
+            return
+
+        task_id = subtask.task_id
+
+        # переключение статуса
+        if callback_data.action == "toggle":
+            subtask.is_done = not subtask.is_done
+            await session.commit()
+
+        # удаление
+        elif callback_data.action == "delete":
+            await session.delete(subtask)
+            await session.commit()
+
+        # после изменения подзадачи — обновляем список
+        result = await session.execute(
+            select(Task)
+            .options(selectinload(Task.subtasks))
+            .where(Task.id == task_id)
+        )
+        task = result.scalar_one_or_none()
+
+        if task is None:
+            try:
+                await callback.message.edit_text(
+                    "☑️ Подзадачи недоступны (задача была удалена)."
+                )
+            except Exception:
+                pass
+            await callback.answer("Подзадача обновлена.")
+            return
+
+        text, kb = await build_subtasks_view(session, task)
+        try:
+            await callback.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            # если Telegram скажет "message is not modified" — просто игнорируем
+            pass
+
+        await callback.answer("Подзадача обновлена ✅")
 
 @tasks_router.message(TaskFileStates.waiting_for_file)
 async def handle_task_file_upload(message: types.Message, state: FSMContext):

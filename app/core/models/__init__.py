@@ -11,3 +11,4 @@ from .task import Task
 from .note import Note
 from .project import Project
 from .task_file import TaskFile
+from .subtask import SubTask
