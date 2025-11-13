@@ -10,8 +10,10 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
         [
             KeyboardButton(text="📁 Проекты"),
         ],
+        [
+            KeyboardButton(text="⚙️ Настройки"),
+        ],
     ]
-
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
         resize_keyboard=True,
