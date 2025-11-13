@@ -46,3 +46,13 @@ class Task(Base):
     # связи
     user = relationship("User", back_populates="tasks")
     project = relationship("Project", back_populates="tasks")
+
+    # ... существующие поля задачи выше ...
+
+    # ====== Напоминания по дедлайнам ======
+    # Отправлено ли напоминание за 1 день до дедлайна
+    remind_1day_sent: Mapped[bool] = mapped_column(default=False)
+    # Отправлено ли напоминание за 3 часа
+    remind_3h_sent: Mapped[bool] = mapped_column(default=False)
+    # Отправлено ли напоминание за 1 час
+    remind_1h_sent: Mapped[bool] = mapped_column(default=False)

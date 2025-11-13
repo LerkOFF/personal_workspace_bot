@@ -6,7 +6,7 @@ from aiogram import Bot
 
 from app.core.db import async_session_maker
 from app.core.models.user import User
-from app.core.models.task import Task
+from app.core.models.task import Task, TaskStatus
 from app.core.models.note import Note
 from app.core.models.project import Project
 
@@ -73,6 +73,85 @@ async def daily_digest(bot: Bot):
                         tasks_overdue.append(task)
                     elif d == today:
                         tasks_today.append(task)
+
+            # ------ напоминания по дедлайнам ------
+            # Шлём за 1 день, за 3 часа и за 1 час до дедлайна
+            for task in tasks:
+                # Напоминания нужны только для задач с дедлайном и не DONE
+                if task.due_at is None:
+                    continue
+                if task.status == TaskStatus.DONE:
+                    continue
+
+                # Сколько осталось до дедлайна
+                delta = task.due_at - now
+                delta_minutes = delta.total_seconds() / 60
+
+                # Если дедлайн уже прошёл — тут ничего не шлём, это разбираем в дайджесте
+                if delta_minutes <= 0:
+                    continue
+
+                # Tolerance в 5 минут, чтобы не промахнуться тиком планировщика
+                def in_window(target_minutes: int, tolerance: int = 5) -> bool:
+                    return (
+                        target_minutes - tolerance
+                        <= delta_minutes
+                        <= target_minutes + tolerance
+                    )
+
+                # За 1 день (24 * 60 минут)
+                if (
+                    in_window(24 * 60)
+                    and not task.remind_1day_sent
+                ):
+                    try:
+                        await bot.send_message(
+                            user.telegram_id,
+                            (
+                                "⏰ <b>Напоминание по задаче</b>\n"
+                                f"До дедлайна по задаче <b>«{task.title}»</b> "
+                                "остался <b>1 день</b>."
+                            ),
+                        )
+                    except Exception:
+                        pass
+                    task.remind_1day_sent = True
+
+                # За 3 часа
+                if (
+                    in_window(3 * 60)
+                    and not task.remind_3h_sent
+                ):
+                    try:
+                        await bot.send_message(
+                            user.telegram_id,
+                            (
+                                "⏰ <b>Напоминание по задаче</b>\n"
+                                f"До дедлайна по задаче <b>«{task.title}»</b> "
+                                "осталось <b>3 часа</b>."
+                            ),
+                        )
+                    except Exception:
+                        pass
+                    task.remind_3h_sent = True
+
+                # За 1 час
+                if (
+                    in_window(60)
+                    and not task.remind_1h_sent
+                ):
+                    try:
+                        await bot.send_message(
+                            user.telegram_id,
+                            (
+                                "⏰ <b>Напоминание по задаче</b>\n"
+                                f"До дедлайна по задаче <b>«{task.title}»</b> "
+                                "остался <b>1 час</b>."
+                            ),
+                        )
+                    except Exception:
+                        pass
+                    task.remind_1h_sent = True
 
             # ------ заметки за вчера ------
             notes_result = await session.execute(
