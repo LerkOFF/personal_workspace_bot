@@ -7,6 +7,7 @@ from aiogram.client.default import DefaultBotProperties
 
 from app.config import settings
 from app.bot.routers.common import common_router
+from app.core.db import init_db
 
 
 async def main():
@@ -15,7 +16,6 @@ async def main():
         format="[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
     )
 
-    # ВАЖНО: в aiogram 3.7+ parse_mode задаётся через default=DefaultBotProperties
     bot = Bot(
         token=settings.bot_token,
         default=DefaultBotProperties(
@@ -25,8 +25,13 @@ async def main():
 
     dp = Dispatcher()
 
-    # Подключаем роутеры (один или несколько)
+    # Роутеры
     dp.include_router(common_router)
+
+    # ИНИЦИАЛИЗАЦИЯ БД (создание таблиц)
+    logging.info("Initializing database...")
+    await init_db()
+    logging.info("Database initialized.")
 
     logging.info("Bot is starting...")
     await dp.start_polling(bot)
