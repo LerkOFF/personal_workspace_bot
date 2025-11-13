@@ -29,6 +29,9 @@ class User(Base):
     # Включены ли ежедневные напоминания (дайджест)
     reminders_enabled: Mapped[bool] = mapped_column(default=True)
 
+    # Включены ли напоминания по дедлайнам задач
+    deadline_reminders_enabled: Mapped[bool] = mapped_column(default=True)
+
     # Время, когда слать дайджест (по умолчанию 09:00)
     reminder_hour: Mapped[int] = mapped_column(default=9)
     reminder_minute: Mapped[int] = mapped_column(default=0)
