@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
 from sqlalchemy import ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -25,3 +25,8 @@ class Project(Base):
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
     user = relationship("User", back_populates="projects")
+
+    tasks: Mapped[List["Task"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )

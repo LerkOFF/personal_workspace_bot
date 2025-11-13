@@ -26,6 +26,12 @@ class Task(Base):
         index=True,
     )
 
+    # теперь задача МОЖЕТ быть привязана к проекту, а может и нет
+    project_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     title: Mapped[str]
     description: Mapped[Optional[str]]
 
@@ -37,5 +43,6 @@ class Task(Base):
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
     due_at: Mapped[Optional[datetime]] = mapped_column(default=None)
 
-    # связь с User
+    # связи
     user = relationship("User", back_populates="tasks")
+    project = relationship("Project", back_populates="tasks")

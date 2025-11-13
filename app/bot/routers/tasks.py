@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional
 
 from aiogram import Router, types, F
@@ -8,6 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.filters.callback_data import CallbackData
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.bot.keyboards.tasks_menu import tasks_menu_kb
 from app.bot.keyboards.main_menu import main_menu_kb
@@ -15,14 +16,20 @@ from app.bot.states.task_states import NewTaskStates
 from app.core.db import async_session_maker
 from app.core.models.user import User
 from app.core.models.task import Task, TaskStatus
+from app.core.models.project import Project
 
 tasks_router = Router()
 
 
 # ====== CallbackData для действий над задачами ======
 class TaskActionCb(CallbackData, prefix="task"):
-    action: str
+    action: str  # "cycle", "delete"
     task_id: int
+
+
+# ====== CallbackData для выбора проекта при создании задачи ======
+class TaskProjectCb(CallbackData, prefix="tproj"):
+    project_id: int  # 0 - без проекта
 
 
 # ====== Вспомогательные функции ======
@@ -38,12 +45,15 @@ def format_task_text(task: Task) -> str:
     if task.description:
         line += f"\n    <i>{task.description}</i>"
 
+    if task.project:
+        line += f"\n    📁 Проект: <b>{task.project.name}</b>"
+
     if task.due_at:
-        # форматируем дату ДД.ММ.ГГГГ
         formatted = task.due_at.strftime("%d.%m.%Y")
         line += f"\n    ⏰ до <b>{formatted}</b>"
 
     return line
+
 
 def task_inline_kb(task: Task):
     builder = InlineKeyboardBuilder()
@@ -92,6 +102,7 @@ async def handle_tasks_menu(message: types.Message):
 
         result = await session.execute(
             select(Task)
+            .options(selectinload(Task.project))
             .where(Task.user_id == user.id)
             .order_by(Task.created_at.desc())
             .limit(10)
@@ -109,7 +120,6 @@ async def handle_tasks_menu(message: types.Message):
         )
         return
 
-    # Список задач + кнопки под каждой
     await message.answer("Твои последние задачи:")
 
     for task in tasks:
@@ -118,14 +128,13 @@ async def handle_tasks_menu(message: types.Message):
             reply_markup=task_inline_kb(task),
         )
 
-    # Кнопка "➕ Добавить задачу"
     await message.answer(
         "Меню задач:",
         reply_markup=tasks_menu_kb(),
     )
 
 
-# ====== Создание задачи (как было) ======
+# ====== Создание задачи ======
 @tasks_router.callback_query(F.data == "tasks:add")
 async def cb_add_task(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -157,26 +166,96 @@ async def new_task_description(message: types.Message, state: FSMContext):
     description: Optional[str] = None if desc_raw == "-" else desc_raw
 
     await state.update_data(description=description)
-    await state.set_state(NewTaskStates.waiting_for_due_date)
+
+    tg_user = message.from_user
+
+    # Проверяем, есть ли у пользователя проекты
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == tg_user.id)
+        )
+        user = result.scalar_one_or_none()
+
+        if user is None:
+            user = User(
+                telegram_id=tg_user.id,
+                first_name=tg_user.first_name,
+                last_name=tg_user.last_name,
+                username=tg_user.username,
+            )
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+
+        result = await session.execute(
+            select(Project)
+            .where(Project.user_id == user.id)
+            .order_by(Project.created_at.desc())
+            .limit(10)
+        )
+        projects = result.scalars().all()
+
+    # Если проектов нет — пропускаем шаг выбора и сразу спрашиваем дедлайн
+    if not projects:
+        await state.set_state(NewTaskStates.waiting_for_due_date)
+        await message.answer(
+            "Укажи <b>дедлайн</b> в формате <code>ДД.ММ.ГГГГ</code>\n"
+            "или напиши <code>-</code>, если дедлайна нет.",
+        )
+        return
+
+    # Есть проекты — даём выбрать
+    builder = InlineKeyboardBuilder()
+
+    for project in projects:
+        builder.button(
+            text=f"📁 {project.name}",
+            callback_data=TaskProjectCb(project_id=project.id).pack(),
+        )
+
+    # опция "Без проекта"
+    builder.button(
+        text="Без проекта",
+        callback_data=TaskProjectCb(project_id=0).pack(),
+    )
+
+    builder.adjust(1)
+
+    await state.set_state(NewTaskStates.waiting_for_project)
     await message.answer(
+        "Выбери <b>проект</b> для задачи или нажми <b>«Без проекта»</b>:",
+        reply_markup=builder.as_markup(),
+    )
+
+
+# ====== Выбор проекта (callback) ======
+@tasks_router.callback_query(TaskProjectCb.filter(), NewTaskStates.waiting_for_project)
+async def choose_task_project(
+    callback: types.CallbackQuery,
+    callback_data: TaskProjectCb,
+    state: FSMContext,
+):
+    await callback.answer()
+
+    project_id = callback_data.project_id if callback_data.project_id != 0 else None
+    await state.update_data(project_id=project_id)
+
+    await state.set_state(NewTaskStates.waiting_for_due_date)
+    await callback.message.answer(
         "Укажи <b>дедлайн</b> в формате <code>ДД.ММ.ГГГГ</code>\n"
         "или напиши <code>-</code>, если дедлайна нет.",
     )
 
 
+# ====== Дедлайн ======
 @tasks_router.message(NewTaskStates.waiting_for_due_date)
 async def new_task_due_date(message: types.Message, state: FSMContext):
-    from datetime import datetime, date
-
     due_raw = message.text.strip()
 
     due_at: Optional[datetime] = None
     if due_raw != "-":
         try:
-            # Формат ДД.ММ.ГГГГ
             parsed_date = datetime.strptime(due_raw, "%d.%m.%Y").date()
-
-            # Проверяем, что дата не в прошлом
             today = date.today()
             if parsed_date < today:
                 await message.answer(
@@ -186,7 +265,6 @@ async def new_task_due_date(message: types.Message, state: FSMContext):
                 )
                 return
 
-            # Дедлайн считается до конца указанного дня
             due_at = datetime(
                 parsed_date.year,
                 parsed_date.month,
@@ -204,6 +282,7 @@ async def new_task_due_date(message: types.Message, state: FSMContext):
     data = await state.get_data()
     title = data["title"]
     description = data["description"]
+    project_id: Optional[int] = data.get("project_id")
 
     tg_user = message.from_user
 
@@ -226,6 +305,7 @@ async def new_task_due_date(message: types.Message, state: FSMContext):
 
         task = Task(
             user_id=user.id,
+            project_id=project_id,
             title=title,
             description=description,
             status=TaskStatus.TODO,
@@ -252,7 +332,6 @@ async def task_action_handler(
     tg_user = callback.from_user
 
     async with async_session_maker() as session:
-        # находим пользователя
         result = await session.execute(
             select(User).where(User.telegram_id == tg_user.id)
         )
@@ -261,9 +340,10 @@ async def task_action_handler(
             await callback.answer("Пользователь не найден в системе.", show_alert=True)
             return
 
-        # находим задачу
         result = await session.execute(
-            select(Task).where(Task.id == callback_data.task_id)
+            select(Task)
+            .options(selectinload(Task.project))
+            .where(Task.id == callback_data.task_id)
         )
         task = result.scalar_one_or_none()
 
@@ -272,9 +352,7 @@ async def task_action_handler(
             await callback.message.edit_text("❌ Задача недоступна.")
             return
 
-        # Действия
         if callback_data.action == "cycle":
-            # меняем статус по кругу
             if task.status == TaskStatus.TODO:
                 task.status = TaskStatus.IN_PROGRESS
             elif task.status == TaskStatus.IN_PROGRESS:
