@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
 from sqlalchemy import BigInteger
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -26,8 +26,12 @@ class User(Base):
 
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
-    # Связь: один пользователь -> много задач
-    tasks: Mapped[list["Task"]] = relationship(
+    tasks: Mapped[List["Task"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+    notes: Mapped[List["Note"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
     )
