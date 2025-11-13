@@ -33,6 +33,7 @@ class TaskActionCb(CallbackData, prefix="task"):
     #  - "attach"       — прикрепить файл
     #  - "subtasks"     — открыть список подзадач
     #  - "add_subtask"  — добавить новую подзадачу
+    #  - "back_to_task" — вернуться к карточке задачи
     action: str
     task_id: int
 
@@ -196,10 +197,21 @@ async def build_subtasks_view(session, task: Task):
         ).pack(),
     )
 
+    # Кнопка "Назад к задаче"
+    builder.button(
+        text="⬅️ Назад к задаче",
+        callback_data=TaskActionCb(
+            action="back_to_task",
+            task_id=task.id,
+        ).pack(),
+    )
+
     if subtasks:
-        builder.adjust(2, 1)
+        # подзадачи идут парами (toggle/delete), потом "добавить", потом "назад"
+        builder.adjust(2, 1, 1)
     else:
-        builder.adjust(1)
+        # только "добавить" и "назад"
+        builder.adjust(1, 1)
 
     return text, builder.as_markup()
 
@@ -611,6 +623,16 @@ async def task_action_handler(
                 reply_markup=main_menu_kb(),
             )
             await callback.answer()
+
+        # Вернуться к карточке задачи
+        elif callback_data.action == "back_to_task":
+            # task у нас уже загружен выше через select(...) и selectinload(...)
+            await callback.message.edit_text(
+                format_task_text(task),
+                reply_markup=task_inline_kb(task),
+            )
+            await callback.answer()
+
 
 @tasks_router.message(SubTaskStates.waiting_for_title)
 async def handle_new_subtask(message: types.Message, state: FSMContext):
